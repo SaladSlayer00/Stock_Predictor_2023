@@ -9,7 +9,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 from lime.lime_tabular import LimeTabularExplainer
-
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
 
 ticker = 'TSLA'
@@ -20,13 +21,30 @@ fred_symbols = ['UNRATE', 'GDP', 'FEDFUNDS', 'CPIAUCNS', 'M2', 'DGS10', 'PCE', '
 
 historical_data = si.get_data(ticker, start_date, end_date, interval='1d')
 historical_data = historical_data.drop(columns=['ticker'])
-
 fred_df = pdr.get_data_fred(fred_symbols, start_date, end_date)
+historical_data = historical_data.reset_index()
+fred_df = fred_df.reset_index()
+fred_df = fred_df.fillna(method='ffill').fillna(method='bfill')
+historical_data = historical_data.rename(columns={'index': 'DATE'})
 
-df_join = historical_data.join(fred_df, how='left')
-dataset = df_join.fillna(method='ffill').fillna(method='bfill')
-dataset = dataset.drop(columns=['adjclose'])
 
+# Initialize SparkSession
+spark = SparkSession.builder \
+    .appName("StockPrediction") \
+    .getOrCreate()
+
+historical_data_spark = spark.createDataFrame(historical_data)
+fred_df_spark = spark.createDataFrame(fred_df)
+
+
+# Joining the dataframes
+df_join_spark = historical_data_spark.join(fred_df_spark, on="DATE", how="left")
+
+# Drop unnecessary columns
+dataset_spark = df_join_spark.drop('adjclose', 'ticker')
+
+# Convert back to Pandas for modeling
+dataset = dataset_spark.toPandas()
 
 X = dataset.drop(columns=['close'])
 y = dataset['close']
