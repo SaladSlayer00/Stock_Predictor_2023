@@ -59,6 +59,7 @@ dataset_spark = dataset_spark.dropna()
 # Prepare data for MLlib
 feature_columns = [col_name for col_name in dataset_spark.columns if col_name != 'close']
 vector_assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+
 # Determine the split point based on the desired ratio
 split_ratio = 0.8  # 80% for training, 20% for testing
 split_point = int(dataset_spark.count() * split_ratio)
@@ -66,6 +67,9 @@ split_point = int(dataset_spark.count() * split_ratio)
 # Split the data into training and testing sets
 train_data = dataset_spark.limit(split_point)
 test_data = dataset_spark.subtract(train_data)
+# Reorder by index
+train_data = train_data.orderBy("Index")
+test_data = test_data.orderBy("Index")
 
 lr = LinearRegression(labelCol='close', featuresCol='features')
 pipeline = Pipeline(stages=[vector_assembler, lr])
