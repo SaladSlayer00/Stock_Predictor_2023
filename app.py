@@ -3,6 +3,7 @@ from pyspark.ml.regression import LinearRegression
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import VectorAssembler
 from yahoo_fin import stock_info as si
+from pyspark.ml.regression import RandomForestRegressor
 import datetime as dt
 from pyspark.ml import Pipeline
 import pandas_datareader as pdr
@@ -106,9 +107,11 @@ if st.button("Perform Analysis"):
         model = LinearRegression(labelCol='close', featuresCol='features')
         evaluator = RegressionEvaluator(labelCol="close", predictionCol="prediction", metricName="rmse")
     elif selected_model == "Random Forest":
-        model = RandomForestClassifier(labelCol='close', featuresCol='features')
-        evaluator = MulticlassClassificationEvaluator(labelCol="close", predictionCol="prediction",
-                                                      metricName="accuracy")
+        # Create a Random Forest Regressor model
+        model = RandomForestRegressor(labelCol='close', featuresCol='features', numTrees=10)
+        evaluator = RegressionEvaluator(labelCol="close", predictionCol="prediction", metricName="rmse")
+
+
     else:
         st.error("Invalid model selection")
 
