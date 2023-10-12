@@ -1,9 +1,9 @@
 ####################### Import necessary libraries  ###############################
-from pyspark.ml.regression import LinearRegression
+from lime.lime_tabular import LimeTabularExplainer
+from pyspark.ml.regression import LinearRegression, GBTRegressor, RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import VectorAssembler
 from yahoo_fin import stock_info as si
-from pyspark.ml.regression import RandomForestRegressor
 import datetime as dt
 from pyspark.ml import Pipeline
 import pandas_datareader as pdr
@@ -12,10 +12,12 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import year, month, dayofmonth, concat, lpad, monotonically_increasing_id
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 
-stock_ticker = ["AAPL", "TSLA", "GOOG"]  # Add more stock symbols as needed
 
-model_list = ["Linear Regression", "Random Forest", "LSTM"]  # Add more stock symbols as needed
+stock_ticker = ["AAPL", "TSLA", "GOOG", "MSFT", "NVDA", "AMZN"]  # Add more stock symbols as needed
+
+model_list = ["Linear Regression", "Random Forest", "Gradient Boosted Tree"]  # Add more stock symbols as needed
 
 fred_symbols = ['SP500', 'DJIA', 'NASDAQCOM', 'VIXCLS', 'GVZCLS', 'DTWEXBGS',
                 'IUDSOIA', 'BAMLHE00EHYIEY', 'DFF', 'T10Y2Y', 'DGS10', 'T10YIE',
@@ -25,7 +27,7 @@ start_date = dt.datetime(2013, 9, 30)
 end_date = dt.datetime.now()
 
 def current_data_preprocessing(ticker):
-    # Collect historical data and FRED data
+    # Get historical data from Yahoo Finance
     historical_data = si.get_data(ticker, start_date, end_date, interval='1d')
     fred_df = pdr.get_data_fred(fred_symbols, start_date, end_date)
 
@@ -37,9 +39,10 @@ def current_data_preprocessing(ticker):
     historical_data_spark = spark.createDataFrame(historical_data.reset_index())
     fred_df_spark = spark.createDataFrame(fred_df.reset_index())
 
-    # Rename columns and add 'fulldate' as an integer column
+    # Data Preprocessing
     historical_data_spark = historical_data_spark.withColumnRenamed("index", "DATE")
     historical_data_spark = historical_data_spark.drop('ticker', 'adjclose')
+
     historical_data_spark = historical_data_spark.withColumn("year", year("DATE"))
     historical_data_spark = historical_data_spark.withColumn("month", month("DATE"))
     historical_data_spark = historical_data_spark.withColumn("day", dayofmonth("DATE"))
@@ -49,61 +52,95 @@ def current_data_preprocessing(ticker):
                                                                                 lpad(historical_data_spark['day'], 2,
                                                                                      '0')))
     historical_data_spark = historical_data_spark.withColumn('fulldate', historical_data_spark['fulldate'].cast('int'))
-
-    # Add an 'Index' column to FRED data
     fred_df_spark = fred_df_spark.withColumn("Index", monotonically_increasing_id())
-
-    # Join historical and FRED data, and order by date
     dataset_spark = historical_data_spark.join(fred_df_spark, on="DATE", how="left")
     dataset_spark = dataset_spark.orderBy("DATE")
     dataset_spark = dataset_spark.withColumn("Index", monotonically_increasing_id())
-    dataset_spark = dataset_spark.drop("DATE")
-
-    # Drop rows with null values
     dataset_spark = dataset_spark.dropna()
 
-    return dataset_spark
+    # Save into an array the DATE column
+    dates = dataset_spark.select("DATE").collect()
+    # Dates to convert into pandas array
+    dates = [date[0] for date in dates]
+    dataset_spark_training = dataset_spark.drop("DATE")
+    # Save into an array the close column
+    all_closes = dataset_spark.select("close").collect()
 
 
-def predict_future_close_prices(model_fit, feature_columns, future_timestamps):
-    # Create a DataFrame for future timestamps
-    future_data = pd.DataFrame({'fulldate': future_timestamps}).astype({'fulldate': 'int'})
+    return dataset_spark_training, dates, all_closes
 
-    # Create a Spark DataFrame from the Pandas DataFrame
-    future_data_spark = spark.createDataFrame(future_data)
+def data_exploration(dataset_spark):
+    st.header("Data Exploration")
+    st.write(f"Performing exploration of Close Prices of {selected_stock} stock...")
+    # %%
+    # Use Spark SQL to get some basic statistics and print the results
+    dataset_spark.createOrReplaceTempView("dataset_spark")
 
-    # Use the vector assembler to assemble features
-    future_data_spark = vector_assembler.transform(future_data_spark)
+    # Calculate summary statistics for the "close" column
+    summary_query = "SELECT MIN(close) AS min_close, MAX(close) AS max_close, AVG(close) AS mean_close, STDDEV(close) AS stddev_close FROM dataset_spark"
+    summary_result = spark.sql(summary_query)
 
-    # Make predictions for future timestamps
-    future_predictions = model_fit.transform(future_data_spark)
+    # Convert Spark DataFrame to Pandas DataFrame
+    summary_df = summary_result.toPandas()
 
-    # Extract the predicted close prices
-    future_predicted_close = future_predictions.select("prediction").rdd.map(lambda row: row[0]).collect()
+    # Extract metric values
+    min_close = summary_df['min_close'].iloc[0]
+    max_close = summary_df['max_close'].iloc[0]
+    mean_close = summary_df['mean_close'].iloc[0]
+    stddev_close = summary_df['stddev_close'].iloc[0]
 
-    return future_predicted_close
+    # Display metrics in Streamlit
+    st.metric("Minimum Close", min_close)
+    st.metric("Maximum Close", max_close)
+    st.metric("Average Close", mean_close)
+    st.metric("Standard Deviation of Close", stddev_close)
+    # Define the number of bins for the histogram
+    num_bins = 20
+
+    # Calculate bin width
+    bin_width = (summary_result.collect()[0]["max_close"] - summary_result.collect()[0]["min_close"]) / num_bins
+
+    # Generate the histogram data
+    histogram_query = f"SELECT CAST((close - {summary_result.collect()[0]['min_close']}) / {bin_width} AS INT) AS bin, COUNT(*) AS frequency FROM dataset_spark GROUP BY bin ORDER BY bin"
+    histogram_data = spark.sql(histogram_query)
+
+    # Collect the histogram data to the driver
+    histogram_data_df = histogram_data.toPandas()
+
+    # Plot the histogram using Matplotlib
+    plt.figure(figsize=(10, 6))
+    plt.bar(histogram_data_df["bin"] * bin_width + summary_result.collect()[0]["min_close"],
+            histogram_data_df["frequency"], width=bin_width, edgecolor='k')
+    plt.xlabel("Close Price")
+    plt.ylabel("Frequency")
+    plt.title("Histogram of Close Prices")
+
+    # Display the plot in Streamlit
+    st.pyplot(plt)
 
 
-def plot_predictions(dates, actual_close, predicted_close):
-    plt.figure(figsize=(12, 6))
-    plt.plot(dates, actual_close, label="Actual Close", color="b")
-    plt.plot(dates, predicted_close, label="Predicted Close", color="r")
-    plt.xlabel("Date")
-    plt.ylabel("Close Price")
-    plt.title("Actual vs. Predicted Close Prices")
-    plt.legend()
-    plt.grid(True)
-    st.pyplot()
+def plot_predictions(dates, dates_test, all_closes, predicted_close):
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    ax.plot(dates, all_closes, color="b")
+    ax.plot(dates_test, actual_close, label="Actual Close", color="b")
+    ax.plot(dates_test, predicted_close, label="Linear Regression Close", color="r")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Close Price")
+    ax.set_title("Actual vs. Predicted Close Prices")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
 
 def plot_historical_data(dates, historical_close):
-    plt.figure(figsize=(12, 6))
-    plt.plot(dates, historical_close, label="Historical Close", color="b")
-    plt.xlabel("Date")
-    plt.ylabel("Close Price")
-    plt.title("Historical Close Prices")
-    plt.legend()
-    plt.grid(True)
-    st.pyplot()
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(dates, historical_close, label="Historical Close", color="b")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Close Price")
+    ax.set_title("Historical Close Prices")
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
 
 
 ########################################### ML ###########################################
@@ -138,7 +175,9 @@ if st.button("Perform Analysis"):
     st.header("Data Collection and Preprocessing")
     st.write(f"Analyzing {selected_stock} stock...")
     # Perform analysis here and display results
-    dataset_spark = current_data_preprocessing(selected_stock)
+    dataset_spark, dates, all_closes = current_data_preprocessing(selected_stock)
+
+    data_exploration(dataset_spark)
 
     # Define feature columns and split data into training and testing sets
     feature_columns = [col_name for col_name in dataset_spark.columns if col_name != 'close']
@@ -152,7 +191,7 @@ if st.button("Perform Analysis"):
 
     st.header("Predicting Close Prices")
 
-    st.write("Training Data to be used for training the model")
+    st.write(f"Predicting {selected_stock} stock...")
 
     # Create a machine learning model based on the user's selection
     if selected_model == "Linear Regression":
@@ -162,10 +201,11 @@ if st.button("Perform Analysis"):
         # Create a Random Forest Regressor model
         model = RandomForestRegressor(labelCol='close', featuresCol='features', numTrees=10)
         evaluator = RegressionEvaluator(labelCol="close", predictionCol="prediction", metricName="rmse")
+    elif selected_model == "Gradient Boosted Tree":
+        model = GBTRegressor(labelCol='close', featuresCol='features', maxIter=10)
+        evaluator = RegressionEvaluator(labelCol="close", predictionCol="prediction", metricName="rmse")
     else:
         st.error("Invalid model selection")
-
-
 
     # Create a pipeline for the selected model
     pipeline = Pipeline(stages=[vector_assembler, model])
@@ -177,50 +217,80 @@ if st.button("Perform Analysis"):
     predictions = model_fit.transform(test_data)
 
     # Evaluate the model and display the results
-    if selected_model == "Linear Regression":
-        rmse = evaluator.evaluate(predictions)
-    elif selected_model == "Random Forest":
-        rmse = evaluator.evaluate(predictions)
+    rmse = evaluator.evaluate(predictions)
+
 
     # Convert predictions to Pandas DataFrame for plotting
     predictions_pd = predictions.select("Index", "close", "prediction").toPandas()
+
+    # Extract the actual "close" values and timestamp
     actual_close = predictions_pd["close"]
-    dates = predictions_pd["Index"]
+
+    # Extract the predicted values
     predicted_close = predictions_pd["prediction"]
+
+    # Take just last 20% of dates (the testing set)
+    dates_test = dates[split_point:]
 
     st.write("Plotting Actual vs Predicted Close Prices")
 
-    plot_predictions(dates, actual_close, predicted_close)
+    plot_predictions(dates, dates_test, all_closes, predicted_close)
 
     #Print in a beautful way the error rmse of the model
-    st.write("The RMSE of the model is: ", rmse)
+    st.metric(label="RMSE", value=rmse)
 
 
-    #Do you want to see the future?
-    st.header("Predicting Future Close Prices")
-    st.write("Do you want to see the future?")
+    st.title("Model Explanations")
+    st.write(f"Explaining predictions of {selected_stock} stock...")
 
-    if st.button("Show me the future!"):
-        st.write(f"Analyzing the future {selected_stock} stock with {selected_model}")
 
-        # Input field for selecting the number of days into the future
-        days_into_future = st.number_input("Enter the number of days into the future:", min_value=1, value=10)
+    if selected_model is not "Linear Regression":
+        st.header("Feature Importance")
+        importance = model_fit.stages[-1].featureImportances.toArray()
 
-        # Button to trigger future predictions
-        if st.button("Show me the future!"):
-            # Generate future timestamps for prediction from dates array
-            last_date = dates.iloc[-1]
-            future_timestamps = [last_date + i for i in range(1, days_into_future + 1)]
+        # Plotting feature importance
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.bar(feature_columns, importance, label="Gradient Boosted Trees", alpha=0.6)
+        ax.set_xlabel("Features")
+        ax.set_ylabel("Importance")
+        ax.set_title("Feature Importance")
+        ax.legend()
+        ax.set_xticklabels(feature_columns, rotation=45)
 
-            # Call the predict_future_close_prices function
-            future_predicted_close = predict_future_close_prices(model_fit, feature_columns, future_timestamps)
+        # Display the plot in Streamlit
+        st.pyplot(fig)
 
-            # Create a DataFrame for the future predictions
-            future_predictions_df = pd.DataFrame(
-                {'fulldate': future_timestamps, 'predicted_close': future_predicted_close})
+    train_data_pd = train_data.toPandas()
+    X_train = train_data_pd.drop(['close'], axis=1)
+    y_train = train_data_pd[['close']]
+    test_data_pd = test_data.toPandas()
+    X_test = test_data_pd.drop(['close'], axis=1)
+    y_test = test_data_pd[['close']]
 
-            # Display the future predictions
-            st.write("Future Close Price Predictions:")
-            st.write(future_predictions_df)
+    explainer = LimeTabularExplainer(X_train.values,
+                                         mode="regression",
+                                         feature_names=X_train.columns.tolist(),
+                                         training_labels=y_train,
+                                         verbose=True)
+    instance = X_test.iloc[0].values
 
-############################################################################################
+    # For the Linear Regression model
+    prediction_func = lambda x: model_fit.transform(
+            spark.createDataFrame(pd.DataFrame(x, columns=X_test.columns))).select("prediction").toPandas().values
+    exp = explainer.explain_instance(instance, prediction_func)
+
+    # Plot the explanation using LIME's built-in visualizations
+    fig = exp.as_pyplot_figure()
+    plt.tight_layout()
+
+    # Convert the plot to a PNG image in memory
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+
+    # Provide the PNG image as a downloadable file in Streamlit
+    #st.download_button('Download the explanation', buf.getvalue(), file_name='lime_explanation.png', mime='image/png')
+    # Display the PNG image in the Streamlit app
+    st.image(buf, caption="LIME Explanation", use_column_width=True)
+
+    st.balloons()
