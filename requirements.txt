@@ -1,0 +1,10 @@
+matplotlib~=3.5.2
+streamlit~=1.27.1
+pandas~=1.4.4
+lime~=0.2.0.1
+pyspark~=3.4.1
+scikit-learn~=1.1.2
+yahoo_fin~=0.8.9
+pandas_datareader~=0.10.0
+pyarrow~=5.0.0
+tensowrflow~=2.6.0
