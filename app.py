@@ -17,7 +17,7 @@ from io import BytesIO
 
 stock_ticker = ["AAPL", "TSLA", "GOOG", "MSFT", "NVDA", "AMZN"]  # Add more stock symbols as needed
 
-model_list = ["Linear Regression", "Random Forest", "Gradient Boosted Tree"]  # Add more stock symbols as needed
+model_list = ["Linear Regression", "Random Forest", "Gradient Boosted Tree", 'LSTM']  # Add more stock symbols as needed
 
 fred_symbols = ['SP500', 'DJIA', 'NASDAQCOM', 'VIXCLS', 'GVZCLS', 'DTWEXBGS',
                 'IUDSOIA', 'BAMLHE00EHYIEY', 'DFF', 'T10Y2Y', 'DGS10', 'T10YIE',
